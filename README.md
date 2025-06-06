@@ -25,7 +25,7 @@ The `test_image` folder contains a sample image for testing the application:
 
 1. Clone this repository:
 ```bash
-git clone https://github.com/landang14/magCalApp.git
+git clone https://github.com/jianglab/magCalApp.git
 cd magCalApp
 ```
 

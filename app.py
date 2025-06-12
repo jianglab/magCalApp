@@ -6,6 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from io import BytesIO
 import mrcfile
+from scipy.stats import norm
 # ---------- Documentation ----------
 """Microscope Calibration Tool
 
@@ -85,7 +86,7 @@ app_ui = ui.page_fillable(
                 ui.input_checkbox("circle_custom", "Res (Å):", value=False),
                 ui.input_numeric("custom_resolution", None, value=3.0, min=0.1, max=10.0, step=0.01, width="80px"),
             ),
-            ui.input_slider("apix_slider", "Apix (Å/px)", min=0.01, max=6.0, value=1.0, step=0.01),
+            ui.input_slider("apix_slider", "Apix (Å/px)", min=0.001, max=6.0, value=1.0, step=0.001),
             ui.div(
                 {"style": "display: flex; align-items: center; gap: 10px; margin-bottom: 10px;"},
                 ui.div(
@@ -189,6 +190,14 @@ app_ui = ui.page_fillable(
                         ui.div(
                             {"style": "display: flex; flex-direction: column; justify-content: flex-start; margin-left: 10px; width: 200px;"},
                             ui.input_checkbox("log_y", "Log Scale", value=False),
+                            ui.div(
+                                {"style": "margin-bottom: 10px;"},
+                                ui.input_checkbox("gaussian_filter", "Apply Gaussian Filter", value=False),
+                                ui.panel_conditional(
+                                    "input.gaussian_filter",
+                                    ui.input_slider("gaussian_sigma", "σ", min=0.001, max=0.1, value=0.02, step=0.001),
+                                ),
+                            ),
                             ui.input_action_button("reset_zoom", "Reset Zoom"),
                             ui.p("Drag to zoom, double-click to reset"),
                         ),
@@ -499,8 +508,8 @@ def server(input: Inputs, output: Outputs, session: Session):
         slider_value = input.apix_slider()
         current_apix.set(slider_value)
         # Update min and max range values to ±10% of current apix
-        min_apix = max(0.01, slider_value * 0.9)  # Ensure we don't go below minimum
-        max_apix = min(6.0, slider_value * 1.1)   # Ensure we don't exceed maximum
+        min_apix = max(0.01, slider_value * 0.99)  # Ensure we don't go below minimum
+        max_apix = min(6.0, slider_value * 1.01)   # Ensure we don't exceed maximum
         ui.update_numeric("apix_min", value=round(min_apix, 3), session=session)
         ui.update_numeric("apix_max", value=round(max_apix, 3), session=session)
 
@@ -1014,6 +1023,33 @@ def server(input: Inputs, output: Outputs, session: Session):
             ax.set_ylabel("Log(Average FFT intensity)")
         else:
             ax.set_ylabel("Average FFT intensity")
+
+        # Apply Gaussian filter if enabled
+        if input.gaussian_filter():
+            # Initialize combined Gaussian filter
+            x = inverse_resolution[mask]
+            combined_gaussian = np.zeros_like(x)
+            
+            # Check each resolution and add its Gaussian
+            if input.circle_213():
+                gaussian = norm.pdf(x, loc=1/2.13, scale=input.gaussian_sigma())
+                combined_gaussian += gaussian
+            if input.circle_235():
+                gaussian = norm.pdf(x, loc=1/2.355, scale=input.gaussian_sigma())
+                combined_gaussian += gaussian
+            if input.circle_366():
+                gaussian = norm.pdf(x, loc=1/3.661, scale=input.gaussian_sigma())
+                combined_gaussian += gaussian
+            if input.circle_custom():
+                gaussian = norm.pdf(x, loc=1/input.custom_resolution(), scale=input.gaussian_sigma())
+                combined_gaussian += gaussian
+            
+            # Only apply if at least one resolution was selected
+            if np.any(combined_gaussian > 0):
+                # Normalize combined Gaussian to have peak of 1
+                combined_gaussian = combined_gaussian / combined_gaussian.max()
+                # Apply filter
+                y_data = y_data * combined_gaussian
 
         ax.plot(inverse_resolution[mask], y_data, label="FFT average")
         

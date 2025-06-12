@@ -1,5 +1,5 @@
 from shiny import App, Inputs, Outputs, Session, render, ui, reactive
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import tempfile
 from pathlib import Path
@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 import mrcfile
 from scipy.stats import norm
+import time
+import asyncio
 # ---------- Documentation ----------
 """Microscope Calibration Tool
 
@@ -15,7 +17,7 @@ It calculates the pixel size (Angstroms/pixel) by measuring diffraction patterns
 from known specimens like graphene, gold, or ice.
 
 Key Features:
-- Supports common image formats (.png, .jpg, .tif) and MRC files
+- Supports common image formats (.png, .tif) and MRC files
 - Interactive FFT analysis with resolution circles
 - Automatic pixel size detection
 - Radial averaging for enhanced signal detection
@@ -46,7 +48,7 @@ Usage:
     Run the Shiny app and follow the web interface.
     
 Input Files:
-    - Image formats: PNG, JPEG, TIFF
+    - Image formats: PNG, TIFF
     - MRC files from microscopes
     
 Key Parameters:
@@ -77,7 +79,7 @@ app_ui = ui.page_fillable(
     #ui.p("Upload an image of test specimens", style="font-size: 1.5em;"),
     ui.layout_sidebar(
         ui.sidebar(
-            ui.input_file("upload", "Upload an image of test specimens (e.g., graphene)(.mrc,.tif,.png,.jpg)", accept=["image/*", ".mrc"]),
+            ui.input_file("upload", "Upload an image of test specimens (e.g., graphene)(.mrc,.tif,.png)", accept=["image/*", ".mrc", ".tif", ".png"]),
             ui.input_checkbox("circle_213", "Graphene", value=True),
             ui.input_checkbox("circle_235", "Gold", value=False),
             ui.input_checkbox("circle_366", "Ice", value=False),
@@ -86,16 +88,27 @@ app_ui = ui.page_fillable(
                 ui.input_checkbox("circle_custom", "Res (Å):", value=False),
                 ui.input_numeric("custom_resolution", None, value=3.0, min=0.1, max=10.0, step=0.01, width="80px"),
             ),
-            ui.input_slider("apix_slider", "Apix (Å/px)", min=0.001, max=6.0, value=1.0, step=0.001),
             ui.div(
-                {"style": "display: flex; align-items: center; gap: 10px; margin-bottom: 10px;"},
+                {"style": "padding: 10px; background-color: #f8f9fa; border-radius: 5px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 5px;"},
                 ui.div(
                     {"style": "flex: 1;"},
-                    ui.input_numeric("apix_min", "Min Apix", value=0.8, min=0.01, max=6.0, step=0.1),
+                    ui.input_slider("apix_slider", "Apix (Å/px)", min=0.001, max=6.0, value=1.0, step=0.001),
+                ),
+                ui.div(
+                    {"style": "display: flex; justify-content: flex-start; align-items: bottom; gap: 5px; margin-top: 5px; width: 100%;"},
+                    ui.input_text("apix_exact_str", None, value="1.0", width="70px"),
+                    ui.input_action_button("apix_set_btn", ui.tags.span("Set", style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;"), class_="btn-primary", style="height: 38px; display: flex; align-items: center;", width="50px"),
+                ),
+            ),
+            ui.div(
+                {"style": "display: flex; align-items: center; gap: 10px; margin-top: 10px; margin-bottom: 10px; padding: 10px; background-color: #f8f9fa; border-radius: 5px;"},
+                ui.div(
+                    {"style": "flex: 1;"},
+                    ui.input_numeric("apix_min", "Search Min", value=0.8, min=0.01, max=6.0, step=0.1),
                 ),
                 ui.div(
                     {"style": "flex: 1;"},
-                    ui.input_numeric("apix_max", "Max Apix", value=1.2, min=0.01, max=6.0, step=0.1),
+                    ui.input_numeric("apix_max", "Search Max", value=1.2, min=0.01, max=6.0, step=0.1),
                 ),
                 ui.div(
                     ui.input_action_button("search_apix", "Search", class_="btn-primary"),
@@ -504,14 +517,32 @@ def server(input: Inputs, output: Outputs, session: Session):
     @reactive.Effect
     @reactive.event(input.apix_slider)
     def _():
-        """Update current_apix when slider changes."""
+        """Update current_apix and text input when slider changes."""
         slider_value = input.apix_slider()
         current_apix.set(slider_value)
-        # Update min and max range values to ±10% of current apix
-        min_apix = max(0.01, slider_value * 0.99)  # Ensure we don't go below minimum
-        max_apix = min(6.0, slider_value * 1.01)   # Ensure we don't exceed maximum
-        ui.update_numeric("apix_min", value=round(min_apix, 3), session=session)
-        ui.update_numeric("apix_max", value=round(max_apix, 3), session=session)
+        # Update text input to match slider
+        ui.update_text("apix_exact_str", value=str(round(slider_value, 3)), session=session)
+
+    @reactive.Effect
+    @reactive.event(input.apix_set_btn)
+    def _():
+        """Update slider and apix only when Set button is clicked and value is valid. Also update apix_min and apix_max to ±1%."""
+        try:
+            val = float(input.apix_exact_str())
+            if 0.001 <= val <= 6.0:
+                ui.update_slider("apix_slider", value=val, session=session)
+                current_apix.set(val)
+                # Update apix_min and apix_max to ±1% of set value
+                min_apix = max(0.01, round(val * 0.99, 3))
+                max_apix = min(6.0, round(val * 1.01, 3))
+                ui.update_numeric("apix_min", value=min_apix, session=session)
+                ui.update_numeric("apix_max", value=max_apix, session=session)
+            else:
+                # Optionally, show an error or reset
+                pass
+        except Exception:
+            # Optionally, show an error or reset
+            pass
 
     @reactive.Effect
     @reactive.event(input.image_display_click)
@@ -528,6 +559,7 @@ def server(input: Inputs, output: Outputs, session: Session):
     @reactive.Effect
     @reactive.event(input.search_apix)
     async def _():
+        """Handle apix search and update controls."""
         # Get the current FFT data
         from shiny import req
         path = image_path()
@@ -567,7 +599,6 @@ def server(input: Inputs, output: Outputs, session: Session):
 
         def find_local_peaks(profile, min_distance=5):
             """Find indices of local peaks in the profile."""
-            # Use a window of size min_distance to find local maxima
             peaks = []
             for i in range(min_distance, len(profile) - min_distance):
                 window = profile[i-min_distance:i+min_distance+1]
@@ -577,7 +608,6 @@ def server(input: Inputs, output: Outputs, session: Session):
 
         def score_peak_match(peak_freq, target_freq):
             """Score how well a peak frequency matches the target frequency."""
-            # Closer matches get higher scores (negative distance)
             return -abs(peak_freq - target_freq)
 
         apix_values = np.linspace(min_apix, max_apix, 100)
@@ -585,7 +615,7 @@ def server(input: Inputs, output: Outputs, session: Session):
         best_apix = None
         target_freq = 1 / resolution
 
-        # Smooth the radial profile to reduce noise
+        # Smooth the radial profile
         window_size = 5
         smoothed_profile = np.convolve(radial_profile, 
                                      np.ones(window_size)/window_size, 
@@ -595,14 +625,10 @@ def server(input: Inputs, output: Outputs, session: Session):
         peak_indices = find_local_peaks(smoothed_profile)
 
         for apix in apix_values:
-            # Convert peak positions to frequencies for this apix
             freqs = np.arange(len(smoothed_profile)) / (arr.shape[0] * apix)
-            
-            # Score each peak based on how well it matches the target frequency
             for peak_idx in peak_indices:
-                if peak_idx < len(freqs):  # Ensure peak index is valid
+                if peak_idx < len(freqs):
                     peak_freq = freqs[peak_idx]
-                    # Weight the score by the peak height
                     peak_height = smoothed_profile[peak_idx]
                     score = score_peak_match(peak_freq, target_freq) * peak_height
                     
@@ -615,17 +641,13 @@ def server(input: Inputs, output: Outputs, session: Session):
                 'apix': best_apix,
                 'score': best_score
             })
-            # Update the apix slider with the new value
+            # Update the controls with the new value
             new_apix = round(best_apix, 3)
+            current_apix.set(new_apix)
             ui.update_slider("apix_slider", value=new_apix, session=session)
+            ui.update_text("apix_exact_str", value=str(new_apix), session=session)
             
-            # Update the search range to ±10% of new apix
-            min_apix = max(0.01, new_apix * 0.9)  # Ensure we don't go below minimum
-            max_apix = min(6.0, new_apix * 1.1)   # Ensure we don't exceed maximum
-            ui.update_numeric("apix_min", value=round(min_apix, 3), session=session)
-            ui.update_numeric("apix_max", value=round(max_apix, 3), session=session)
-            
-            # Force update of plots - properly await the async call
+            # Force update of plots
             await session.send_custom_message("shiny:forceUpdate", None)
 
     def get_first_checked_resolution():
@@ -961,6 +983,31 @@ def server(input: Inputs, output: Outputs, session: Session):
         if input.circle_custom():
             r = resolution_to_radius(input.custom_resolution())
             draw.ellipse((center[0] - r, center[1] - r, center[0] + r, center[1] + r), outline="green", width=2)
+
+        # Add current apix label
+        current_apix_str = f"Apix: {get_apix():.3f} Å/px"
+        # Determine color based on selected resolution
+        if input.circle_213():
+            apix_color = "red"
+        elif input.circle_235():
+            apix_color = "orange"
+        elif input.circle_366():
+            apix_color = "blue"
+        elif input.circle_custom():
+            apix_color = "green"
+        else:
+            apix_color = "black"
+        try:
+            font = ImageFont.truetype("Arial", 16)
+        except OSError:
+            font = ImageFont.load_default()
+        text_bbox = draw.textbbox((0, 0), current_apix_str, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        padding = 10
+        draw.rectangle((padding, padding, padding + text_width + 10, padding + text_height + 10), 
+                      fill=(255, 255, 255, 180))
+        draw.text((padding + 5, padding + 5), current_apix_str, fill=apix_color, font=font)
 
         # Draw click marker if exists
         click_pos = fft_click_pos.get()

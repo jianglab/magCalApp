@@ -6,9 +6,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from io import BytesIO
 import mrcfile
-from scipy.stats import norm
+from scipy.stats import norm, median_abs_deviation
 import time
 import asyncio
+from scipy.optimize import curve_fit
 # ---------- Documentation ----------
 """Microscope Calibration Tool
 
@@ -17,7 +18,7 @@ It calculates the pixel size (Angstroms/pixel) by measuring diffraction patterns
 from known specimens like graphene, gold, or ice.
 
 Key Features:
-- Supports common image formats (.png, .tif) and MRC files
+- Supports common image formats (.png, .tiff) and MRC files
 - Interactive FFT analysis with resolution circles
 - Automatic pixel size detection
 - Radial averaging for enhanced signal detection
@@ -79,7 +80,7 @@ app_ui = ui.page_fillable(
     #ui.p("Upload an image of test specimens", style="font-size: 1.5em;"),
     ui.layout_sidebar(
         ui.sidebar(
-            ui.input_file("upload", "Upload an image of test specimens (e.g., graphene)(.mrc,.tif,.png)", accept=["image/*", ".mrc", ".tif", ".png"]),
+            ui.input_file("upload", "Upload an image of test specimens (e.g., graphene)(.mrc,.tiff,.png)", accept=["image/*", ".mrc", ".tiff", ".png"]),
             ui.input_checkbox("circle_213", "Graphene", value=True),
             ui.input_checkbox("circle_235", "Gold", value=False),
             ui.input_checkbox("circle_366", "Ice", value=False),
@@ -92,11 +93,11 @@ app_ui = ui.page_fillable(
                 {"style": "padding: 10px; background-color: #f8f9fa; border-radius: 5px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 5px;"},
                 ui.div(
                     {"style": "flex: 1;"},
-                    ui.input_slider("apix_slider", "Apix (Å/px)", min=0.001, max=6.0, value=1.0, step=0.001),
+                    ui.input_slider("apix_slider", "Apix (Å/px)", min=0.001, max=6.0, value=1.0, step=0.0001),
                 ),
                 ui.div(
                     {"style": "display: flex; justify-content: flex-start; align-items: bottom; gap: 5px; margin-top: 5px; width: 100%;"},
-                    ui.input_text("apix_exact_str", None, value="1.0", width="70px"),
+                    ui.input_text("apix_exact_str", None, value="1.0000", width="70px"),
                     ui.input_action_button("apix_set_btn", ui.tags.span("Set", style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;"), class_="btn-primary", style="height: 38px; display: flex; align-items: center;", width="50px"),
                 ),
             ),
@@ -202,17 +203,9 @@ app_ui = ui.page_fillable(
                         ui.output_plot("fft_1d_plot", click=True, dblclick=True, brush=True, width="600px", height="400px"),
                         ui.div(
                             {"style": "display: flex; flex-direction: column; justify-content: flex-start; margin-left: 10px; width: 200px;"},
-                            ui.input_checkbox("log_y", "Log Scale", value=False),
-                            ui.div(
-                                {"style": "margin-bottom: 10px;"},
-                                ui.input_checkbox("gaussian_filter", "Apply Gaussian Filter", value=False),
-                                ui.panel_conditional(
-                                    "input.gaussian_filter",
-                                    ui.input_slider("gaussian_sigma", "σ", min=0.001, max=0.1, value=0.02, step=0.001),
-                                ),
-                            ),
-                            ui.input_action_button("reset_zoom", "Reset Zoom"),
-                            ui.p("Drag to zoom, double-click to reset"),
+                            ui.input_checkbox("show_max_profile", "Show Max Profile", value=True),
+                            ui.input_checkbox("show_avg_profile", "Show Average Profile", value=True),
+                            ui.input_checkbox("fit_gaussian", "Fit Gaussian", value=False),
                         ),
                     ),
                     ui.div(
@@ -502,12 +495,6 @@ def server(input: Inputs, output: Outputs, session: Session):
         'score': None
     })
 
-    # Add plot zoom state
-    plot_zoom = reactive.Value({
-        'x_range': None,
-        'y_range': None
-    })
-
     # Add reactive values for raw data and region
     raw_image_data = reactive.Value({
         'img': None,
@@ -520,8 +507,8 @@ def server(input: Inputs, output: Outputs, session: Session):
         """Update current_apix and text input when slider changes."""
         slider_value = input.apix_slider()
         current_apix.set(slider_value)
-        # Update text input to match slider
-        ui.update_text("apix_exact_str", value=str(round(slider_value, 3)), session=session)
+        # Update text input to match slider with 4 decimal places
+        ui.update_text("apix_exact_str", value=f"{slider_value:.4f}", session=session)
 
     @reactive.Effect
     @reactive.event(input.apix_set_btn)
@@ -533,8 +520,8 @@ def server(input: Inputs, output: Outputs, session: Session):
                 ui.update_slider("apix_slider", value=val, session=session)
                 current_apix.set(val)
                 # Update apix_min and apix_max to ±1% of set value
-                min_apix = max(0.01, round(val * 0.99, 3))
-                max_apix = min(6.0, round(val * 1.01, 3))
+                min_apix = max(0.01, round(val * 0.99, 4))
+                max_apix = min(6.0, round(val * 1.01, 4))
                 ui.update_numeric("apix_min", value=min_apix, session=session)
                 ui.update_numeric("apix_max", value=max_apix, session=session)
             else:
@@ -577,15 +564,6 @@ def server(input: Inputs, output: Outputs, session: Session):
         fshift = np.fft.fftshift(f)
         magnitude = np.abs(fshift)
 
-        # Compute radial profile
-        cy, cx = np.array(magnitude.shape) // 2
-        y, x = np.indices(magnitude.shape)
-        r = np.sqrt((x - cx)**2 + (y - cy)**2)
-        r = r.astype(np.int32)
-        radial_sum = np.bincount(r.ravel(), magnitude.ravel())
-        radial_count = np.bincount(r.ravel())
-        radial_profile = radial_sum / (radial_count + 1e-8)
-
         # Get the first checked resolution
         resolution, _ = get_first_checked_resolution()
         if resolution is None:
@@ -615,26 +593,66 @@ def server(input: Inputs, output: Outputs, session: Session):
         best_apix = None
         target_freq = 1 / resolution
 
-        # Smooth the radial profile
+        # Convert to polar coordinates
+        cy, cx = np.array(magnitude.shape) // 2
+        y, x = np.indices(magnitude.shape)
+        r = np.sqrt((x - cx)**2 + (y - cy)**2)
+        r = r.astype(np.int32)
+
+        # Calculate both max and average profiles
+        unique_radii = np.unique(r)
+        max_profile = np.zeros_like(unique_radii, dtype=np.float32)
+        for i, radius in enumerate(unique_radii):
+            mask = (r == radius)
+            if np.any(mask):
+                max_profile[i] = np.max(magnitude[mask])
+
+        radial_sum = np.bincount(r.ravel(), magnitude.ravel())
+        radial_count = np.bincount(r.ravel())
+        avg_profile = radial_sum / (radial_count + 1e-8)
+
+        # Smooth the profiles
         window_size = 5
-        smoothed_profile = np.convolve(radial_profile, 
+        smoothed_max = np.convolve(max_profile, 
+                                 np.ones(window_size)/window_size, 
+                                 mode='valid')
+        smoothed_avg = np.convolve(avg_profile, 
                                      np.ones(window_size)/window_size, 
                                      mode='valid')
 
-        # Find peaks in the smoothed profile
-        peak_indices = find_local_peaks(smoothed_profile)
+        # Find peaks in both profiles
+        max_peak_indices = find_local_peaks(smoothed_max)
+        avg_peak_indices = find_local_peaks(smoothed_avg)
+
+        # Determine which profile to use based on user selection
+        use_max = input.show_max_profile()
+        use_avg = input.show_avg_profile()
 
         for apix in apix_values:
-            freqs = np.arange(len(smoothed_profile)) / (arr.shape[0] * apix)
-            for peak_idx in peak_indices:
-                if peak_idx < len(freqs):
-                    peak_freq = freqs[peak_idx]
-                    peak_height = smoothed_profile[peak_idx]
-                    score = score_peak_match(peak_freq, target_freq) * peak_height
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_apix = apix
+            freqs = np.arange(len(smoothed_max)) / (arr.shape[0] * apix)
+            
+            # Try max profile first if enabled
+            if use_max:
+                for peak_idx in max_peak_indices:
+                    if peak_idx < len(freqs):
+                        peak_freq = freqs[peak_idx]
+                        peak_height = smoothed_max[peak_idx]
+                        score = score_peak_match(peak_freq, target_freq) * peak_height
+                        if score > best_score:
+                            best_score = score
+                            best_apix = apix
+                            continue  # Skip average profile if max profile found a good match
+            
+            # Try average profile if max profile is disabled or didn't find a good match
+            if use_avg and (not use_max or best_score == -np.inf):
+                for peak_idx in avg_peak_indices:
+                    if peak_idx < len(freqs):
+                        peak_freq = freqs[peak_idx]
+                        peak_height = smoothed_avg[peak_idx]
+                        score = score_peak_match(peak_freq, target_freq) * peak_height
+                        if score > best_score:
+                            best_score = score
+                            best_apix = apix
 
         if best_apix is not None:
             search_results.set({
@@ -642,10 +660,10 @@ def server(input: Inputs, output: Outputs, session: Session):
                 'score': best_score
             })
             # Update the controls with the new value
-            new_apix = round(best_apix, 3)
+            new_apix = round(best_apix, 4)  # Use 4 decimal places
             current_apix.set(new_apix)
             ui.update_slider("apix_slider", value=new_apix, session=session)
-            ui.update_text("apix_exact_str", value=str(new_apix), session=session)
+            ui.update_text("apix_exact_str", value=f"{new_apix:.4f}", session=session)
             
             # Force update of plots
             await session.send_custom_message("shiny:forceUpdate", None)
@@ -1024,6 +1042,24 @@ def server(input: Inputs, output: Outputs, session: Session):
     @render.plot
     def fft_1d_plot():
         from shiny import req
+        from scipy.optimize import curve_fit
+        
+        def gaussian(x, a, mu, sigma):
+            """Gaussian function for curve fitting."""
+            return a * np.exp(-(x - mu)**2 / (2 * sigma**2))
+        
+        def find_local_peak(x_data, y_data, window_size=5):
+            """Find the local peak position and height."""
+            max_idx = np.argmax(y_data)
+            # Use a small window around the max to get a better estimate
+            start_idx = max(0, max_idx - window_size)
+            end_idx = min(len(y_data), max_idx + window_size + 1)
+            window_x = x_data[start_idx:end_idx]
+            window_y = y_data[start_idx:end_idx]
+            peak_x = window_x[np.argmax(window_y)]
+            peak_y = np.max(window_y)
+            return peak_x, peak_y
+        
         path = image_path()
         req(path and path.exists())
         req(raw_image_data.get()['data'] is not None)
@@ -1032,135 +1068,143 @@ def server(input: Inputs, output: Outputs, session: Session):
         if region is None:
             return None
 
-        # Compute FFT and radial profile
+        # Compute FFT and get power spectrum
         arr = np.array(region.convert("L")).astype(np.float32)
         f = np.fft.fft2(arr)
         fshift = np.fft.fftshift(f)
-        magnitude = np.abs(fshift)
+        pwr = np.abs(fshift)  # Power spectrum
 
-        # Compute radial coordinates
-        cy, cx = np.array(magnitude.shape) // 2
-        y, x = np.indices(magnitude.shape)
+        # Get the selected resolution
+        resolution, _ = get_first_checked_resolution()
+        if resolution is None:
+            resolution = 2.13  # Default to graphene if none selected
+
+        # Convert to polar coordinates
+        cy, cx = np.array(pwr.shape) // 2
+        y, x = np.indices(pwr.shape)
         r = np.sqrt((x - cx)**2 + (y - cy)**2)
-        r = r.astype(np.int32)
+        r = r.astype(int)
+        
+        # Calculate max profile
+        unique_radii = np.unique(r)
+        max_profile = np.zeros_like(unique_radii, dtype=np.float32)
+        for i, radius in enumerate(unique_radii):
+            mask = (r == radius)
+            if np.any(mask):
+                max_profile[i] = np.max(pwr[mask])
 
-        # Compute radial average
-        radial_sum = np.bincount(r.ravel(), magnitude.ravel())
+        # Calculate average profile
+        radial_sum = np.bincount(r.ravel(), pwr.ravel())
         radial_count = np.bincount(r.ravel())
-        radial_profile = radial_sum / (radial_count + 1e-8)
+        avg_profile = radial_sum / (radial_count + 1e-8)
 
-        # Convert to spatial frequency
-        freqs = np.arange(len(radial_profile)) / (arr.shape[0] * get_apix())
-        inverse_resolution = freqs  # in 1/Å
-
-        # Determine index range for 1/3.7 to 1/2
-        x_min, x_max = 1 / 3.7, 1 / 2.0
-        mask = (inverse_resolution >= x_min) & (inverse_resolution <= x_max)
+        # Convert radii to resolutions, avoiding division by zero
+        freqs = np.zeros_like(unique_radii, dtype=np.float32)
+        mask = unique_radii > 0  # Avoid division by zero
+        freqs[mask] = unique_radii[mask] / (arr.shape[0] * get_apix())
+        resolutions = np.zeros_like(freqs)
+        resolutions[mask] = 1 / freqs[mask]  # Convert to resolution in Å
+        
+        # Set x limits to ±0.5% of resolution
+        x_min = resolution * 0.995
+        x_max = resolution * 1.005
+        title_suffix = f"around {resolution:.2f} Å (±0.5%)"
+        
+        mask = (resolutions >= x_min) & (resolutions <= x_max) & (resolutions > 0)
+        
+        # Get data within window
+        x_data = resolutions[mask]
 
         # Create figure with adjusted margins
         fig = plt.figure(figsize=(10, 6))
-        # Adjust subplot parameters to give more space at the bottom
         plt.subplots_adjust(bottom=0.15, left=0.12, right=0.95, top=0.95)
         ax = fig.add_subplot(111)
         
-        # Plot data
-        y_data = radial_profile[mask]
-        if input.log_y():
-            y_data = np.log1p(y_data)
-            ax.set_ylabel("Log(Average FFT intensity)")
-        else:
-            ax.set_ylabel("Average FFT intensity")
-
-        # Apply Gaussian filter if enabled
-        if input.gaussian_filter():
-            # Initialize combined Gaussian filter
-            x = inverse_resolution[mask]
-            combined_gaussian = np.zeros_like(x)
+        # Plot max profile if enabled
+        if input.show_max_profile():
+            y_data = max_profile[mask]
+            # Normalize only the data within the window
+            y_data = y_data - np.median(y_data)
+            y_data = y_data / median_abs_deviation(y_data)
             
-            # Check each resolution and add its Gaussian
-            if input.circle_213():
-                gaussian = norm.pdf(x, loc=1/2.13, scale=input.gaussian_sigma())
-                combined_gaussian += gaussian
-            if input.circle_235():
-                gaussian = norm.pdf(x, loc=1/2.355, scale=input.gaussian_sigma())
-                combined_gaussian += gaussian
-            if input.circle_366():
-                gaussian = norm.pdf(x, loc=1/3.661, scale=input.gaussian_sigma())
-                combined_gaussian += gaussian
-            if input.circle_custom():
-                gaussian = norm.pdf(x, loc=1/input.custom_resolution(), scale=input.gaussian_sigma())
-                combined_gaussian += gaussian
+            ax.plot(x_data, y_data, label="Max Profile", color='red')
             
-            # Only apply if at least one resolution was selected
-            if np.any(combined_gaussian > 0):
-                # Normalize combined Gaussian to have peak of 1
-                combined_gaussian = combined_gaussian / combined_gaussian.max()
-                # Apply filter
-                y_data = y_data * combined_gaussian
-
-        ax.plot(inverse_resolution[mask], y_data, label="FFT average")
+            # Fit Gaussian if enabled
+            if input.fit_gaussian():
+                try:
+                    # Find local peak for better initial guess
+                    peak_x, peak_y = find_local_peak(x_data, y_data)
+                    
+                    # Initial guess for Gaussian parameters
+                    sigma_guess = resolution * 0.01
+                    p0 = [peak_y, peak_x, sigma_guess]
+                    
+                    # Set bounds for the parameters
+                    bounds = (
+                        [peak_y * 0.1, resolution * 0.998, resolution * 0.001],
+                        [peak_y * 2.0, resolution * 1.002, resolution * 0.02]
+                    )
+                    
+                    popt, pcov = curve_fit(gaussian, x_data, y_data, p0=p0, bounds=bounds)
+                    x_fit = np.linspace(x_min, x_max, 1000)
+                    y_fit = gaussian(x_fit, *popt)
+                    
+                    ax.plot(x_fit, y_fit, '--', color='red', alpha=0.5,
+                           label='Max Gaussian Fit')
+                except:
+                    pass
         
-        # Set axis limits based on zoom state or defaults
-        zoom = plot_zoom.get()
-        if zoom['x_range'] is not None and zoom['y_range'] is not None:
-            xlim = zoom['x_range']
-            ax.set_xlim(xlim)
-        else:
-            ax.set_xlim(x_min, x_max)
-            xlim = (x_min, x_max)
+        # Plot average profile if enabled
+        if input.show_avg_profile():
+            # Get average profile data for the same resolutions
+            avg_freqs = np.arange(len(avg_profile)) / (arr.shape[0] * get_apix())
+            avg_resolutions = np.zeros_like(avg_freqs)
+            mask = avg_freqs > 0
+            avg_resolutions[mask] = 1 / avg_freqs[mask]
+            avg_mask = (avg_resolutions >= x_min) & (avg_resolutions <= x_max) & (avg_resolutions > 0)
+            y_data = avg_profile[avg_mask]
+            # Normalize only the data within the window
+            y_data = y_data - np.median(y_data)
+            y_data = y_data / median_abs_deviation(y_data)
             
-        if zoom['y_range'] is not None:
-            ax.set_ylim(zoom['y_range'])
-        else:
-            ax.set_ylim(y_data.min(), y_data.max())
+            ax.plot(avg_resolutions[avg_mask], y_data, label="Average Profile", color='blue')
+            
+            # Fit Gaussian if enabled
+            if input.fit_gaussian():
+                try:
+                    # Find local peak for better initial guess
+                    peak_x, peak_y = find_local_peak(avg_resolutions[avg_mask], y_data)
+                    
+                    # Initial guess for Gaussian parameters
+                    sigma_guess = resolution * 0.01
+                    p0 = [peak_y, peak_x, sigma_guess]
+                    
+                    # Set bounds for the parameters
+                    bounds = (
+                        [peak_y * 0.1, resolution * 0.998, resolution * 0.001],
+                        [peak_y * 2.0, resolution * 1.002, resolution * 0.02]
+                    )
+                    
+                    popt, pcov = curve_fit(gaussian, avg_resolutions[avg_mask], y_data, p0=p0, bounds=bounds)
+                    x_fit = np.linspace(x_min, x_max, 1000)
+                    y_fit = gaussian(x_fit, *popt)
+                    
+                    ax.plot(x_fit, y_fit, '--', color='blue', alpha=0.5,
+                           label='Average Gaussian Fit')
+                except:
+                    pass
 
-        # Convert x-axis ticks to resolution values
-        xticks = ax.get_xticks()
-        xticks = xticks[(xticks > 0) & (xticks < max(inverse_resolution[mask]))]
-        ax.set_xticks(xticks)
-        ax.set_xticklabels([f'{1/x:.2f}' for x in xticks])
         ax.set_xlabel("Resolution (Å)")
-        ax.set_title("1D FFT Radial Profile")
+        ax.set_ylabel("FFT intensity (MAD units)")
+        ax.set_title(f"FFT Profile {title_suffix}")
         ax.grid(True)
-
-        # Draw vertical lines for selected circles
-        if input.circle_213():
-            ax.axvline(1/2.13, color="red", linestyle="--", label="Graphene at 2.13 Å")
-        if input.circle_235():
-            ax.axvline(1/2.355, color="orange", linestyle="--", label="Gold at 2.355 Å")
-        if input.circle_366():
-            ax.axvline(1/3.661, color="blue", linestyle="--", label="Ice at 3.661 Å")
-        if input.circle_custom():
-            ax.axvline(1/input.custom_resolution(), color="green", linestyle="--", 
-                      label=f"Custom at {input.custom_resolution():.2f} Å")
-
-        ax.legend(loc="upper right", fontsize="small")
         
+        # Add vertical line at selected resolution
+        ax.axvline(resolution, color="black", linestyle="--", 
+                  label=f"Selected: {resolution:.2f} Å")
+        
+        ax.legend(loc="upper right", fontsize="small")
         return fig
-
-    @reactive.Effect
-    @reactive.event(input.reset_zoom)
-    async def _():
-        # Clear the brush selection first by sending a custom message
-        await session.send_custom_message("shiny:brushed", {"plot_id": "fft_1d_plot", "coords": None})
-        # Then reset the zoom state
-        plot_zoom.set({'x_range': None, 'y_range': None})
-
-    @reactive.Effect
-    @reactive.event(input.fft_1d_plot_brush)
-    def _():
-        brush_data = input.fft_1d_plot_brush()
-        if brush_data is not None:
-            plot_zoom.set({
-                'x_range': (brush_data['xmin'], brush_data['xmax']),
-                'y_range': (brush_data['ymin'], brush_data['ymax'])
-            })
-
-    @reactive.Effect
-    @reactive.event(input.fft_1d_plot_dblclick)
-    def _():
-        if input.fft_1d_plot_dblclick() is not None:
-            plot_zoom.set({'x_range': None, 'y_range': None})
 
     @output
     @render.text

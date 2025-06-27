@@ -80,19 +80,21 @@ app_ui = ui.page_fillable(
     ui.layout_sidebar(
         ui.sidebar(
             ui.input_file("upload", "Upload an image of test specimens (e.g., graphene)(.mrc,.tiff,.png)", accept=["image/*", ".mrc", ".tif", ".png"]),
-            ui.input_checkbox("circle_213", "Graphene", value=True),
-            ui.input_checkbox("circle_235", "Gold", value=False),
-            ui.input_checkbox("circle_366", "Ice", value=False),
-            ui.div(
-                {"style": "display: flex; align-items: center;"},
-                ui.input_checkbox("circle_custom", "Res (Å):", value=False),
-                ui.input_numeric("custom_resolution", None, value=3.0, min=0.1, max=10.0, step=0.01, width="80px"),
+            ui.input_select("resolution_type", "Resolution Type", 
+                          choices=["Graphene (2.13 Å)", "Gold (2.355 Å)", "Ice (3.661 Å)", "Custom"], 
+                          selected="Graphene (2.13 Å)"),
+            ui.panel_conditional(
+                "input.resolution_type == 'Custom'",
+                ui.div(
+                    {"style": "display: flex; align-items: center;"},
+                    ui.input_numeric("custom_resolution", "Custom Res (Å):", value=3.0, min=0.1, max=10.0, step=0.01, width="80px"),
+                ),
             ),
             ui.div(
                 {"style": "padding: 10px; background-color: #f8f9fa; border-radius: 5px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 5px;"},
                 ui.div(
                     {"style": "flex: 1;"},
-                    ui.input_slider("apix_slider", "Apix (Å/px)", min=0.001, max=6.0, value=1.0, step=0.001),
+                    ui.input_slider("apix_slider", "Apix (Å/px)", min=0.5, max=2.0, value=1.0, step=0.001),
                 ),
                 ui.div(
                     {"style": "display: flex; justify-content: flex-start; align-items: bottom; gap: 5px; margin-top: 5px; width: 100%;"},
@@ -495,14 +497,17 @@ def server(input: Inputs, output: Outputs, session: Session):
         'y': None
     })
 
-    # Add reactive value for apix
-    current_apix = reactive.Value(1.0)
+    # --- Single source of truth for apix ---
+    apix_master = reactive.Value(1.0)
 
     # Add reactive value for apix search results
     search_results = reactive.Value({
         'apix': None,
         'score': None
     })
+
+    # Add reactive value to cache the base FFT image
+    cached_fft_image = reactive.Value(None)
 
     # Add plot zoom state
     plot_zoom = reactive.Value({
@@ -516,34 +521,30 @@ def server(input: Inputs, output: Outputs, session: Session):
         'data': None
     })
 
+    # Add reactive value for 1D plot click position
+    plot_1d_click_pos = reactive.Value({
+        'x': None,
+        'y': None
+    })
+
+    # --- All events update apix_master ---
     @reactive.Effect
     @reactive.event(input.apix_slider)
     def _():
-        """Update current_apix and text input when slider changes."""
-        slider_value = input.apix_slider()
-        current_apix.set(slider_value)
-        # Update text input to match slider
-        ui.update_text("apix_exact_str", value=str(round(slider_value, 3)), session=session)
+        apix_master.set(input.apix_slider())
+        # Clear 1D plot clicked position when apix changes from slider
+        plot_1d_click_pos.set({'x': None, 'y': None})
 
     @reactive.Effect
     @reactive.event(input.apix_set_btn)
     def _():
-        """Update slider and apix only when Set button is clicked and value is valid. Also update apix_min and apix_max to ±1%."""
         try:
             val = float(input.apix_exact_str())
             if 0.001 <= val <= 6.0:
-                ui.update_slider("apix_slider", value=val, session=session)
-                current_apix.set(val)
-                # Update apix_min and apix_max to ±1% of set value
-                min_apix = max(0.01, round(val * 0.99, 3))
-                max_apix = min(6.0, round(val * 1.01, 3))
-                ui.update_numeric("apix_min", value=min_apix, session=session)
-                ui.update_numeric("apix_max", value=max_apix, session=session)
-            else:
-                # Optionally, show an error or reset
-                pass
+                apix_master.set(val)
+                # Clear 1D plot clicked position when apix changes from Set button
+                plot_1d_click_pos.set({'x': None, 'y': None})
         except Exception:
-            # Optionally, show an error or reset
             pass
 
     @reactive.Effect
@@ -668,22 +669,24 @@ def server(input: Inputs, output: Outputs, session: Session):
             })
             # Update the controls with the new value
             new_apix = round(best_apix, 3)
-            current_apix.set(new_apix)
+            apix_master.set(new_apix)
             ui.update_slider("apix_slider", value=new_apix, session=session)
             ui.update_text("apix_exact_str", value=str(new_apix), session=session)
+            # Clear 1D plot clicked position when apix changes from search
+            plot_1d_click_pos.set({'x': None, 'y': None})
             
             # Force update of plots
             await session.send_custom_message("shiny:forceUpdate", None)
 
     def get_first_checked_resolution():
         """Return the first checked resolution value or None if none are checked."""
-        if input.circle_213():
+        if input.resolution_type() == "Graphene (2.13 Å)":
             return 2.13, "red"
-        elif input.circle_235():
+        elif input.resolution_type() == "Gold (2.355 Å)":
             return 2.355, "orange"
-        elif input.circle_366():
+        elif input.resolution_type() == "Ice (3.661 Å)":
             return 3.661, "blue"
-        elif input.circle_custom():
+        elif input.resolution_type() == "Custom":
             return input.custom_resolution(), "green"
         return None, None
 
@@ -720,9 +723,9 @@ def server(input: Inputs, output: Outputs, session: Session):
                 
                 # Update apix value if within bounds
                 if 0.01 <= new_apix <= 6.0:
-                    new_value = round(new_apix, 3)
-                    # Update the slider value directly without triggering current_apix
-                    ui.update_slider("apix_slider", value=new_value, session=session)
+                    apix_master.set(round(new_apix, 3))
+                    # Clear 1D plot clicked position when apix changes from 2D plot
+                    plot_1d_click_pos.set({'x': None, 'y': None})
 
     @reactive.Calc
     def image_path():
@@ -878,7 +881,7 @@ def server(input: Inputs, output: Outputs, session: Session):
 
     @reactive.Calc
     def get_apix():
-        return current_apix.get()
+        return apix_master.get()
 
     def get_processed_image_for_display():
         """Get the contrast-adjusted image from raw data for display only."""
@@ -911,6 +914,18 @@ def server(input: Inputs, output: Outputs, session: Session):
             'img': img,
             'data': raw_data
         })
+
+    @reactive.Effect
+    @reactive.event(input.upload, input.rg_size, input.contrast, input.zoom1, input.image_display_click)
+    def _():
+        """Update cached FFT image when region or contrast changes."""
+        region = get_current_region()
+        if region is not None:
+            # Generate base FFT image without circles
+            fft_img = compute_fft_image_region(region, input.contrast())
+            cached_fft_image.set(fft_img)
+        else:
+            cached_fft_image.set(None)
 
     @output
     @render.image
@@ -979,12 +994,12 @@ def server(input: Inputs, output: Outputs, session: Session):
         path = image_path()
         req(path and path.exists())
         req(raw_image_data.get()['data'] is not None)
+        req(cached_fft_image.get() is not None)
         
-        region = get_current_region()
-        if region is None:
-            return None
-            
-        fft_img = compute_fft_image_region(region, input.contrast())
+        # Use cached FFT image to avoid recomputation
+        fft_img = cached_fft_image.get().copy()
+        
+        # Apply zoom
         base_size = size
         zoom_factor = input.zoom2() / 100
         new_size = int(base_size * zoom_factor)
@@ -996,29 +1011,29 @@ def server(input: Inputs, output: Outputs, session: Session):
             return (fft_img.size[0] * get_apix()) / res_angstrom
 
         # Draw resolution circles
-        if input.circle_213():
+        if input.resolution_type() == "Graphene (2.13 Å)":
             r = resolution_to_radius(2.13)
             draw.ellipse((center[0] - r, center[1] - r, center[0] + r, center[1] + r), outline="red", width=2)
-        if input.circle_235():
+        if input.resolution_type() == "Gold (2.355 Å)":
             r = resolution_to_radius(2.355)
             draw.ellipse((center[0] - r, center[1] - r, center[0] + r, center[1] + r), outline="orange", width=2)
-        if input.circle_366():
+        if input.resolution_type() == "Ice (3.661 Å)":
             r = resolution_to_radius(3.661)
             draw.ellipse((center[0] - r, center[1] - r, center[0] + r, center[1] + r), outline="blue", width=2)
-        if input.circle_custom():
+        if input.resolution_type() == "Custom":
             r = resolution_to_radius(input.custom_resolution())
             draw.ellipse((center[0] - r, center[1] - r, center[0] + r, center[1] + r), outline="green", width=2)
 
         # Add current apix label
         current_apix_str = f"Apix: {get_apix():.3f} Å/px"
         # Determine color based on selected resolution
-        if input.circle_213():
+        if input.resolution_type() == "Graphene (2.13 Å)":
             apix_color = "red"
-        elif input.circle_235():
+        elif input.resolution_type() == "Gold (2.355 Å)":
             apix_color = "orange"
-        elif input.circle_366():
+        elif input.resolution_type() == "Ice (3.661 Å)":
             apix_color = "blue"
-        elif input.circle_custom():
+        elif input.resolution_type() == "Custom":
             apix_color = "green"
         else:
             apix_color = "black"
@@ -1177,24 +1192,52 @@ def server(input: Inputs, output: Outputs, session: Session):
         ax.set_title("1D FFT Radial Profile")
         ax.grid(True)
 
-        # Draw vertical lines for selected circles (convert resolution to radius in pixels)
-        if input.circle_213():
-            radius_213 = (arr.shape[0] * get_apix()) / 2.13
-            if radius_213 <= x_max:
-                ax.axvline(radius_213, color="red", linestyle="--", label="Graphene at 2.13 Å")
-        if input.circle_235():
-            radius_235 = (arr.shape[0] * get_apix()) / 2.355
-            if radius_235 <= x_max:
-                ax.axvline(radius_235, color="orange", linestyle="--", label="Gold at 2.355 Å")
-        if input.circle_366():
-            radius_366 = (arr.shape[0] * get_apix()) / 3.661
-            if radius_366 <= x_max:
-                ax.axvline(radius_366, color="blue", linestyle="--", label="Ice at 3.661 Å")
-        if input.circle_custom():
-            radius_custom = (arr.shape[0] * get_apix()) / input.custom_resolution()
-            if radius_custom <= x_max:
-                ax.axvline(radius_custom, color="green", linestyle="--", 
+        # Get clicked position if available
+        clicked_pos = plot_1d_click_pos.get()
+        clicked_radius = None
+        if clicked_pos['x'] is not None:
+            clicked_radius = clicked_pos['x']
+
+        # Draw vertical lines for selected circles
+        # Use clicked position if available, otherwise use calculated position
+        if input.resolution_type() == "Graphene (2.13 Å)":
+            if clicked_radius is not None and x_min <= clicked_radius <= x_max:
+                # Use clicked position
+                ax.axvline(clicked_radius, color="red", linestyle="--", label="Graphene at 2.13 Å")
+            else:
+                # Use calculated position
+                radius_213 = (arr.shape[0] * get_apix()) / 2.13
+                if x_min <= radius_213 <= x_max:
+                    ax.axvline(radius_213, color="red", linestyle="--", label="Graphene at 2.13 Å")
+        elif input.resolution_type() == "Gold (2.355 Å)":
+            if clicked_radius is not None and x_min <= clicked_radius <= x_max:
+                # Use clicked position
+                ax.axvline(clicked_radius, color="orange", linestyle="--", label="Gold at 2.355 Å")
+            else:
+                # Use calculated position
+                radius_235 = (arr.shape[0] * get_apix()) / 2.355
+                if x_min <= radius_235 <= x_max:
+                    ax.axvline(radius_235, color="orange", linestyle="--", label="Gold at 2.355 Å")
+        elif input.resolution_type() == "Ice (3.661 Å)":
+            if clicked_radius is not None and x_min <= clicked_radius <= x_max:
+                # Use clicked position
+                ax.axvline(clicked_radius, color="blue", linestyle="--", label="Ice at 3.661 Å")
+            else:
+                # Use calculated position
+                radius_366 = (arr.shape[0] * get_apix()) / 3.661
+                if x_min <= radius_366 <= x_max:
+                    ax.axvline(radius_366, color="blue", linestyle="--", label="Ice at 3.661 Å")
+        elif input.resolution_type() == "Custom":
+            if clicked_radius is not None and x_min <= clicked_radius <= x_max:
+                # Use clicked position
+                ax.axvline(clicked_radius, color="green", linestyle="--", 
                           label=f"Custom at {input.custom_resolution():.2f} Å")
+            else:
+                # Use calculated position
+                radius_custom = (arr.shape[0] * get_apix()) / input.custom_resolution()
+                if x_min <= radius_custom <= x_max:
+                    ax.axvline(radius_custom, color="green", linestyle="--", 
+                              label=f"Custom at {input.custom_resolution():.2f} Å")
 
         ax.legend(loc="upper left", fontsize="small")
         
@@ -1228,6 +1271,48 @@ def server(input: Inputs, output: Outputs, session: Session):
         if input.fft_1d_plot_dblclick() is not None:
             plot_zoom.set({'x_range': None, 'y_range': None})
 
+    @reactive.Effect
+    @reactive.event(input.fft_1d_plot_click)
+    def _():
+        """Handle clicks on the 1D FFT plot to update apix based on clicked position, mimicking 2D FFT logic."""
+        click_data = input.fft_1d_plot_click()
+        if click_data is not None:
+            # Step 1: Get the x location (radius in region pixels) from the click
+            region_radius = click_data['x']
+            
+            # Step 2: Convert region radius to full FFT coordinates
+            # The 1D plot uses region coordinates, but 2D FFT uses full image coordinates
+            region = get_current_region()
+            if region is None:
+                return
+                
+            # Get the region size and full image size
+            region_size = region.size[0]  # This is the cropped region size
+            full_fft_size = size  # This is the full FFT image size (360)
+            
+            # Scale the radius from region coordinates to full FFT coordinates
+            fft_radius = region_radius * (full_fft_size / region_size)
+            
+            # Store click position for visualization (in region coordinates for display)
+            plot_1d_click_pos.set({
+                'x': region_radius,
+                'y': click_data['y']
+            })
+            
+            # Step 3: Get the selected resolution
+            resolution, _ = get_first_checked_resolution()
+            if resolution is None or fft_radius == 0:
+                return
+            
+            # Step 4: Calculate new apix using the same formula as 2D FFT click
+            # new_apix = (distance * resolution) / size
+            # where distance = fft_radius (scaled to full FFT coordinates)
+            new_apix = (fft_radius * resolution) / full_fft_size
+            
+            # Step 5: Update the apix slider if within bounds
+            if 0.01 <= new_apix <= 6.0:
+                apix_master.set(round(new_apix, 3))
+
     @output
     @render.text
     def matched_apix():
@@ -1235,6 +1320,31 @@ def server(input: Inputs, output: Outputs, session: Session):
         if result['apix'] is not None:
             return f"Best Matched Apix: {result['apix']:.3f} Å/px"
         return "Best Matched Apix: -"
+
+    # --- All UI controls and plots react to apix_master ---
+    @reactive.Effect
+    @reactive.event(apix_master)
+    def _():
+        val = apix_master.get()
+        ui.update_slider("apix_slider", value=val, session=session)
+        ui.update_text("apix_exact_str", value=str(round(val, 3)), session=session)
+        # Optionally update apix_min and apix_max
+        min_apix = max(0.01, round(val * 0.99, 3))
+        max_apix = min(6.0, round(val * 1.01, 3))
+        ui.update_numeric("apix_min", value=min_apix, session=session)
+        ui.update_numeric("apix_max", value=max_apix, session=session)
+
+    @reactive.Effect
+    @reactive.event(input.resolution_type)
+    def _():
+        # Clear 1D plot clicked position when resolution type changes
+        plot_1d_click_pos.set({'x': None, 'y': None})
+
+    @reactive.Effect
+    @reactive.event(input.custom_resolution)
+    def _():
+        # Clear 1D plot clicked position when custom resolution changes
+        plot_1d_click_pos.set({'x': None, 'y': None})
 
 app = App(app_ui, server)
 

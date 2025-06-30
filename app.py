@@ -533,7 +533,7 @@ def server(input: Inputs, output: Outputs, session: Session):
     def _():
         apix_master.set(input.apix_slider())
         # Clear 1D plot clicked position when apix changes from slider
-        plot_1d_click_pos.set({'x': None, 'y': None})
+        #plot_1d_click_pos.set({'x': None, 'y': None})
 
     @reactive.Effect
     @reactive.event(input.apix_set_btn)
@@ -543,21 +543,9 @@ def server(input: Inputs, output: Outputs, session: Session):
             if 0.001 <= val <= 6.0:
                 apix_master.set(val)
                 # Clear 1D plot clicked position when apix changes from Set button
-                plot_1d_click_pos.set({'x': None, 'y': None})
+                #plot_1d_click_pos.set({'x': None, 'y': None})
         except Exception:
             pass
-
-    @reactive.Effect
-    @reactive.event(input.image_display_click)
-    def _():
-        click_data = input.image_display_click()
-        if click_data is not None:
-            # Scale the coordinates based on the zoom level
-            zoom_factor = input.zoom1() / 100
-            region_center.set({
-                'x': int(click_data['x'] / zoom_factor),
-                'y': int(click_data['y'] / zoom_factor)
-            })
 
     @reactive.Effect
     @reactive.event(input.search_apix)
@@ -670,7 +658,7 @@ def server(input: Inputs, output: Outputs, session: Session):
             # Update the controls with the new value
             new_apix = round(best_apix, 3)
             apix_master.set(new_apix)
-            ui.update_slider("apix_slider", value=new_apix, session=session)
+            #ui.update_slider("apix_slider", value=new_apix, session=session)
             ui.update_text("apix_exact_str", value=str(new_apix), session=session)
             # Clear 1D plot clicked position when apix changes from search
             plot_1d_click_pos.set({'x': None, 'y': None})
@@ -690,6 +678,19 @@ def server(input: Inputs, output: Outputs, session: Session):
             return input.custom_resolution(), "green"
         return None, None
 
+    # --- Mouse Click Effects ---
+    @reactive.Effect
+    @reactive.event(input.image_display_click)
+    def _():
+        click_data = input.image_display_click()
+        if click_data is not None:
+            # Scale the coordinates based on the zoom level
+            zoom_factor = input.zoom1() / 100
+            region_center.set({
+                'x': int(click_data['x'] / zoom_factor),
+                'y': int(click_data['y'] / zoom_factor)
+            })
+
     @reactive.Effect
     @reactive.event(input.fft_with_circle_click)
     def _():
@@ -705,11 +706,11 @@ def server(input: Inputs, output: Outputs, session: Session):
             if resolution is None:
                 return
                 
-            fft_click_pos.set({
-                'x': x,
-                'y': y,
-                'color': color
-            })
+            # fft_click_pos.set({
+            #     'x': x,
+            #     'y': y,
+            #     'color': color
+            # })
 
             # Calculate distance from center in pixels
             center_x = size / 2
@@ -725,7 +726,73 @@ def server(input: Inputs, output: Outputs, session: Session):
                 if 0.01 <= new_apix <= 6.0:
                     apix_master.set(round(new_apix, 3))
                     # Clear 1D plot clicked position when apix changes from 2D plot
-                    plot_1d_click_pos.set({'x': None, 'y': None})
+                    #plot_1d_click_pos.set({'x': None, 'y': None})
+
+    @reactive.Effect
+    @reactive.event(input.fft_1d_plot_click)
+    def _():
+        """Handle clicks on the 1D FFT plot to update apix based on clicked position, mimicking 2D FFT logic."""
+        click_data = input.fft_1d_plot_click()
+        if click_data is not None:
+            # Step 1: Get the x location (radius in region pixels) from the click
+            region_radius = click_data['x']
+            
+            # Step 2: Convert region radius to full FFT coordinates
+            # The 1D plot uses region coordinates, but 2D FFT uses full image coordinates
+            region = get_current_region()
+            if region is None:
+                return
+                
+            # Get the region size and full image size
+            region_size = region.size[0]  # This is the cropped region size
+            full_fft_size = size  # This is the full FFT image size (360)
+            
+            # Scale the radius from region coordinates to full FFT coordinates
+            fft_radius = region_radius * (full_fft_size / region_size)
+            
+            # Store click position for visualization (in region coordinates for display)
+            # plot_1d_click_pos.set({
+            #     'x': region_radius,
+            #     'y': click_data['y']
+            # })
+            
+            # Step 3: Get the selected resolution
+            resolution, _ = get_first_checked_resolution()
+            if resolution is None or fft_radius == 0:
+                return
+            
+            # Step 4: Calculate new apix using the same formula as 2D FFT click
+            # new_apix = (distance * resolution) / size
+            # where distance = fft_radius (scaled to full FFT coordinates)
+            new_apix = (fft_radius * resolution) / full_fft_size
+            
+            # Step 5: Update the apix slider if within bounds
+            if 0.01 <= new_apix <= 6.0:
+                apix_master.set(round(new_apix, 3))
+
+    @reactive.Effect
+    @reactive.event(input.fft_1d_plot_brush)
+    def _():
+        brush_data = input.fft_1d_plot_brush()
+        if brush_data is not None:
+            plot_zoom.set({
+                'x_range': (brush_data['xmin'], brush_data['xmax']),
+                'y_range': (brush_data['ymin'], brush_data['ymax'])
+            })
+
+    @reactive.Effect
+    @reactive.event(input.fft_1d_plot_dblclick)
+    def _():
+        if input.fft_1d_plot_dblclick() is not None:
+            plot_zoom.set({'x_range': None, 'y_range': None})
+
+    @reactive.Effect
+    @reactive.event(input.reset_zoom)
+    async def _():
+        # Clear the brush selection first by sending a custom message
+        await session.send_custom_message("shiny:brushed", {"plot_id": "fft_1d_plot", "coords": None})
+        # Then reset the zoom state
+        plot_zoom.set({'x_range': None, 'y_range': None})
 
     @reactive.Calc
     def image_path():
@@ -882,6 +949,58 @@ def server(input: Inputs, output: Outputs, session: Session):
     @reactive.Calc
     def get_apix():
         return apix_master.get()
+
+    @reactive.Calc
+    def get_apix_from_distance():
+        """Calculate the apix value from a given distance in pixels and current resolution.
+        
+        Returns:
+            A function that takes distance in pixels and returns the corresponding apix value.
+        """
+        resolution, _ = get_first_checked_resolution()
+        if resolution is None:
+            return lambda distance: None
+        
+        def calculate_apix(distance_pixels):
+            """Calculate apix from distance in pixels.
+            
+            Args:
+                distance_pixels: Distance from center in pixels
+                
+            Returns:
+                Apix value in Å/pixel, or None if invalid
+            """
+            if distance_pixels <= 0:
+                return None
+            return (distance_pixels * resolution) / size
+        
+        return calculate_apix
+
+    @reactive.Calc
+    def get_distance_from_apix():
+        """Calculate the distance in pixels from a given apix value and current resolution.
+        
+        Returns:
+            A function that takes apix value and returns the corresponding distance in pixels.
+        """
+        resolution, _ = get_first_checked_resolution()
+        if resolution is None:
+            return lambda apix: None
+        
+        def calculate_distance(apix_value):
+            """Calculate distance in pixels from apix value.
+            
+            Args:
+                apix_value: Apix value in Å/pixel
+                
+            Returns:
+                Distance from center in pixels, or None if invalid
+            """
+            if apix_value <= 0:
+                return None
+            return (apix_value * size) / resolution
+        
+        return calculate_distance
 
     def get_processed_image_for_display():
         """Get the contrast-adjusted image from raw data for display only."""
@@ -1247,72 +1366,6 @@ def server(input: Inputs, output: Outputs, session: Session):
 
         return fig
 
-    @reactive.Effect
-    @reactive.event(input.reset_zoom)
-    async def _():
-        # Clear the brush selection first by sending a custom message
-        await session.send_custom_message("shiny:brushed", {"plot_id": "fft_1d_plot", "coords": None})
-        # Then reset the zoom state
-        plot_zoom.set({'x_range': None, 'y_range': None})
-
-    @reactive.Effect
-    @reactive.event(input.fft_1d_plot_brush)
-    def _():
-        brush_data = input.fft_1d_plot_brush()
-        if brush_data is not None:
-            plot_zoom.set({
-                'x_range': (brush_data['xmin'], brush_data['xmax']),
-                'y_range': (brush_data['ymin'], brush_data['ymax'])
-            })
-
-    @reactive.Effect
-    @reactive.event(input.fft_1d_plot_dblclick)
-    def _():
-        if input.fft_1d_plot_dblclick() is not None:
-            plot_zoom.set({'x_range': None, 'y_range': None})
-
-    @reactive.Effect
-    @reactive.event(input.fft_1d_plot_click)
-    def _():
-        """Handle clicks on the 1D FFT plot to update apix based on clicked position, mimicking 2D FFT logic."""
-        click_data = input.fft_1d_plot_click()
-        if click_data is not None:
-            # Step 1: Get the x location (radius in region pixels) from the click
-            region_radius = click_data['x']
-            
-            # Step 2: Convert region radius to full FFT coordinates
-            # The 1D plot uses region coordinates, but 2D FFT uses full image coordinates
-            region = get_current_region()
-            if region is None:
-                return
-                
-            # Get the region size and full image size
-            region_size = region.size[0]  # This is the cropped region size
-            full_fft_size = size  # This is the full FFT image size (360)
-            
-            # Scale the radius from region coordinates to full FFT coordinates
-            fft_radius = region_radius * (full_fft_size / region_size)
-            
-            # Store click position for visualization (in region coordinates for display)
-            plot_1d_click_pos.set({
-                'x': region_radius,
-                'y': click_data['y']
-            })
-            
-            # Step 3: Get the selected resolution
-            resolution, _ = get_first_checked_resolution()
-            if resolution is None or fft_radius == 0:
-                return
-            
-            # Step 4: Calculate new apix using the same formula as 2D FFT click
-            # new_apix = (distance * resolution) / size
-            # where distance = fft_radius (scaled to full FFT coordinates)
-            new_apix = (fft_radius * resolution) / full_fft_size
-            
-            # Step 5: Update the apix slider if within bounds
-            if 0.01 <= new_apix <= 6.0:
-                apix_master.set(round(new_apix, 3))
-
     @output
     @render.text
     def matched_apix():
@@ -1325,14 +1378,9 @@ def server(input: Inputs, output: Outputs, session: Session):
     @reactive.Effect
     @reactive.event(apix_master)
     def _():
-        val = apix_master.get()
-        ui.update_slider("apix_slider", value=val, session=session)
-        ui.update_text("apix_exact_str", value=str(round(val, 3)), session=session)
-        # Optionally update apix_min and apix_max
-        min_apix = max(0.01, round(val * 0.99, 3))
-        max_apix = min(6.0, round(val * 1.01, 3))
-        ui.update_numeric("apix_min", value=min_apix, session=session)
-        ui.update_numeric("apix_max", value=max_apix, session=session)
+        # Remove UI control updates to prevent double redraws
+        # UI controls should only be updated when user interacts with them directly
+        pass
 
     @reactive.Effect
     @reactive.event(input.resolution_type)

@@ -94,7 +94,7 @@ app_ui = ui.page_fillable(
                 {"style": "padding: 10px; background-color: #f8f9fa; border-radius: 5px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 5px;"},
                 ui.div(
                     {"style": "flex: 1;"},
-                    ui.input_slider("apix_slider", "Apix (Å/px)", min=0.5, max=2.0, value=1.0, step=0.001),
+                    ui.input_slider("apix_slider", "Apix (Å/px)", min=0.01, max=2.0, value=1.0, step=0.001),
                 ),
                 ui.div(
                     {"style": "display: flex; justify-content: flex-start; align-items: bottom; gap: 5px; margin-top: 5px; width: 100%;"},
@@ -102,20 +102,20 @@ app_ui = ui.page_fillable(
                     ui.input_action_button("apix_set_btn", ui.tags.span("Set", style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;"), class_="btn-primary", style="height: 38px; display: flex; align-items: center;", width="50px"),
                 ),
             ),
-            ui.div(
-                {"style": "display: flex; align-items: center; gap: 10px; margin-top: 10px; margin-bottom: 10px; padding: 10px; background-color: #f8f9fa; border-radius: 5px;"},
-                ui.div(
-                    {"style": "flex: 1;"},
-                    ui.input_numeric("apix_min", "Search Min", value=0.8, min=0.01, max=6.0, step=0.1),
-                ),
-                ui.div(
-                    {"style": "flex: 1;"},
-                    ui.input_numeric("apix_max", "Search Max", value=1.2, min=0.01, max=6.0, step=0.1),
-                ),
-                ui.div(
-                    ui.input_action_button("search_apix", "Search", class_="btn-primary"),
-                ),
-            ),
+            # ui.div(
+            #     {"style": "display: flex; align-items: center; gap: 10px; margin-top: 10px; margin-bottom: 10px; padding: 10px; background-color: #f8f9fa; border-radius: 5px;"},
+            #     ui.div(
+            #         {"style": "flex: 1;"},
+            #         ui.input_numeric("apix_min", "Search Min", value=0.8, min=0.01, max=6.0, step=0.1),
+            #     ),
+            #     ui.div(
+            #         {"style": "flex: 1;"},
+            #         ui.input_numeric("apix_max", "Search Max", value=1.2, min=0.01, max=6.0, step=0.1),
+            #     ),
+            #     ui.div(
+            #         ui.input_action_button("search_apix", "Search", class_="btn-primary"),
+            #     ),
+            # ),
             ui.div(
                 {"style": "margin-top: 10px; padding: 10px; background-color: #f8f9fa; border-radius: 5px;"},
                 ui.output_text("matched_apix", inline=True),
@@ -494,7 +494,8 @@ def server(input: Inputs, output: Outputs, session: Session):
     
     fft_click_pos = reactive.Value({
         'x': None,
-        'y': None
+        'y': None,
+        'color': None
     })
 
     # --- Single source of truth for apix ---
@@ -524,7 +525,8 @@ def server(input: Inputs, output: Outputs, session: Session):
     # Add reactive value for 1D plot click position
     plot_1d_click_pos = reactive.Value({
         'x': None,
-        'y': None
+        'y': None,
+        'color': None
     })
 
     # --- All events update apix_master ---
@@ -541,7 +543,9 @@ def server(input: Inputs, output: Outputs, session: Session):
         try:
             val = float(input.apix_exact_str())
             if 0.001 <= val <= 6.0:
-                apix_master.set(val)
+                #apix_master.set(val)
+                ui.update_slider("apix_slider", value=val, session=session)
+                ui.update_text("apix_exact_str", value=str(round(val, 3)), session=session)
                 # Clear 1D plot clicked position when apix changes from Set button
                 #plot_1d_click_pos.set({'x': None, 'y': None})
         except Exception:
@@ -661,7 +665,7 @@ def server(input: Inputs, output: Outputs, session: Session):
             #ui.update_slider("apix_slider", value=new_apix, session=session)
             ui.update_text("apix_exact_str", value=str(new_apix), session=session)
             # Clear 1D plot clicked position when apix changes from search
-            plot_1d_click_pos.set({'x': None, 'y': None})
+            plot_1d_click_pos.set({'x': None, 'y': None, 'color': None})
             
             # Force update of plots
             await session.send_custom_message("shiny:forceUpdate", None)
@@ -724,9 +728,11 @@ def server(input: Inputs, output: Outputs, session: Session):
                 
                 # Update apix value if within bounds
                 if 0.01 <= new_apix <= 6.0:
-                    apix_master.set(round(new_apix, 3))
-                    # Clear 1D plot clicked position when apix changes from 2D plot
-                    #plot_1d_click_pos.set({'x': None, 'y': None})
+                    new_apix = round(new_apix, 3)
+                    #apix_master.set(new_apix)
+                    # Update UI controls directly to avoid double redraws
+                    ui.update_slider("apix_slider", value=new_apix, session=session)
+                    ui.update_text("apix_exact_str", value=str(new_apix), session=session)
 
     @reactive.Effect
     @reactive.event(input.fft_1d_plot_click)
@@ -750,14 +756,17 @@ def server(input: Inputs, output: Outputs, session: Session):
             # Scale the radius from region coordinates to full FFT coordinates
             fft_radius = region_radius * (full_fft_size / region_size)
             
+            # Get the selected resolution and color
+            resolution, color = get_first_checked_resolution()
+            
             # Store click position for visualization (in region coordinates for display)
             # plot_1d_click_pos.set({
             #     'x': region_radius,
-            #     'y': click_data['y']
+            #     'y': click_data['y'],
+            #     'color': color
             # })
             
             # Step 3: Get the selected resolution
-            resolution, _ = get_first_checked_resolution()
             if resolution is None or fft_radius == 0:
                 return
             
@@ -768,7 +777,11 @@ def server(input: Inputs, output: Outputs, session: Session):
             
             # Step 5: Update the apix slider if within bounds
             if 0.01 <= new_apix <= 6.0:
-                apix_master.set(round(new_apix, 3))
+                new_apix = round(new_apix, 3)
+                #apix_master.set(new_apix)
+                # Update UI controls directly to avoid double redraws
+                ui.update_slider("apix_slider", value=new_apix, session=session)
+                ui.update_text("apix_exact_str", value=str(new_apix), session=session)
 
     @reactive.Effect
     @reactive.event(input.fft_1d_plot_brush)
@@ -1358,7 +1371,7 @@ def server(input: Inputs, output: Outputs, session: Session):
                     ax.axvline(radius_custom, color="green", linestyle="--", 
                               label=f"Custom at {input.custom_resolution():.2f} Å")
 
-        ax.legend(loc="upper left", fontsize="small")
+        ax.legend(loc="lower left", fontsize="small")
         
         # Force matplotlib to use the set limits
         ax.autoscale_view()
@@ -1378,21 +1391,34 @@ def server(input: Inputs, output: Outputs, session: Session):
     @reactive.Effect
     @reactive.event(apix_master)
     def _():
-        # Remove UI control updates to prevent double redraws
-        # UI controls should only be updated when user interacts with them directly
-        pass
+        val = apix_master.get()
+        
+        # Only update if the change is significant (>= 0.001)
+        # This prevents unnecessary updates for tiny changes
+        current_slider_val = input.apix_slider()
+        if abs(val - current_slider_val) < 0.001:
+            return
+            
+        # Update UI controls
+        # ui.update_slider("apix_slider", value=val, session=session)
+        # ui.update_text("apix_exact_str", value=str(round(val, 3)), session=session)
+        
+        # Update FFT circle positions by clearing click positions
+        # This will force the circles to use calculated positions instead of clicked positions
+        fft_click_pos.set({'x': None, 'y': None, 'color': None})
+        plot_1d_click_pos.set({'x': None, 'y': None, 'color': None})
 
     @reactive.Effect
     @reactive.event(input.resolution_type)
     def _():
         # Clear 1D plot clicked position when resolution type changes
-        plot_1d_click_pos.set({'x': None, 'y': None})
+        plot_1d_click_pos.set({'x': None, 'y': None, 'color': None})
 
     @reactive.Effect
     @reactive.event(input.custom_resolution)
     def _():
         # Clear 1D plot clicked position when custom resolution changes
-        plot_1d_click_pos.set({'x': None, 'y': None})
+        plot_1d_click_pos.set({'x': None, 'y': None, 'color': None})
 
 app = App(app_ui, server)
 

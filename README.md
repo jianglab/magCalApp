@@ -1,4 +1,4 @@
-# Microscope Calibration Tool
+# Magnification Calibration Tool
 
 A Python-based tool for calibrating electron microscopes by analyzing test specimen images. This tool helps calculate the pixel size (Angstroms/pixel) by measuring diffraction patterns from known specimens like graphene, gold, or ice.
 

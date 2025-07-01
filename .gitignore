@@ -22,3 +22,5 @@ env/
 # OS specific files
 .DS_Store
 Thumbs.db
+morph.py
+app-core.py

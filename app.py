@@ -552,7 +552,7 @@ app_ui = ui.page_fillable(
     ),
     # Secondary analysis section - scrollable below
     ui.div(
-        {"style": "margin-top: 10px;"},
+        {"style": "margin-top: -30px;"},
         ui.card(
             ui.card_header(
                 ui.tooltip(

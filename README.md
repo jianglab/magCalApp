@@ -56,4 +56,5 @@ The `test_image` folder includes sample TIFF images for quick validation. The de
 ## Notes
 
 - Computation runs client-side in the browser; large regions and large FFT grids can be memory-intensive.
+- URL images are fetched by the browser. Remote links must allow browser fetches/CORS; if a JPEG link fails, download it and use Upload or serve it from the same local folder.
 - TIFF and MRC parsing are intentionally lightweight and may not cover every microscopy file variant.

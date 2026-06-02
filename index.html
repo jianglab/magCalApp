@@ -2160,20 +2160,57 @@
       return { data, width: dw, height: dh, scaleX: sw / dw, scaleY: sh / dh };
     }
 
-    async function decodeRasterWithBrowser(buffer, type) {
-      const blob = new Blob([buffer], { type });
-      const bitmap = await createImageBitmap(blob);
+    function drawRasterToGray(source, width, height) {
       const canvas = document.createElement("canvas");
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
+      canvas.width = width;
+      canvas.height = height;
       const ctx = canvas.getContext("2d");
-      ctx.drawImage(bitmap, 0, 0);
-      const rgba = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
-      const gray = new Float32Array(bitmap.width * bitmap.height);
+      ctx.drawImage(source, 0, 0);
+      const rgba = ctx.getImageData(0, 0, width, height).data;
+      const gray = new Float32Array(width * height);
       for (let i = 0, j = 0; i < gray.length; i++, j += 4) {
         gray[i] = 0.299 * rgba[j] + 0.587 * rgba[j + 1] + 0.114 * rgba[j + 2];
       }
-      return { data: gray, width: bitmap.width, height: bitmap.height };
+      return { data: gray, width, height };
+    }
+
+    function decodeRasterWithImageElement(blob) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(blob);
+        const img = new Image();
+        const cleanup = () => URL.revokeObjectURL(url);
+        img.onload = () => {
+          try {
+            resolve(drawRasterToGray(img, img.naturalWidth || img.width, img.naturalHeight || img.height));
+          } catch (err) {
+            reject(err);
+          } finally {
+            cleanup();
+          }
+        };
+        img.onerror = () => {
+          cleanup();
+          reject(new Error("Browser could not decode this image file."));
+        };
+        img.src = url;
+      });
+    }
+
+    async function decodeRasterWithBrowser(buffer, type) {
+      const blob = new Blob([buffer], { type });
+      if (typeof createImageBitmap === "function") {
+        try {
+          const bitmap = await createImageBitmap(blob);
+          try {
+            return drawRasterToGray(bitmap, bitmap.width, bitmap.height);
+          } finally {
+            if (typeof bitmap.close === "function") bitmap.close();
+          }
+        } catch (err) {
+          if (typeof Image === "undefined") throw err;
+        }
+      }
+      return decodeRasterWithImageElement(blob);
     }
 
     function decodeTiff(buffer) {
@@ -2296,11 +2333,27 @@
       return { data: out, width: nx, height: ny, apix, slices: nz };
     }
 
+    function rasterMimeFromName(name) {
+      const path = name.toLowerCase().split(/[?#]/)[0];
+      if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
+      if (path.endsWith(".png")) return "image/png";
+      if (path.endsWith(".gif")) return "image/gif";
+      if (path.endsWith(".webp")) return "image/webp";
+      if (path.endsWith(".bmp")) return "image/bmp";
+      return "";
+    }
+
+    function rasterMimeForDecode(name, mime = "") {
+      const clean = mime.split(";")[0].trim().toLowerCase();
+      if (clean && clean !== "application/octet-stream" && clean !== "binary/octet-stream") return clean;
+      return rasterMimeFromName(name) || "image/png";
+    }
+
     async function decodeImageBuffer(name, buffer, mime = "") {
       const lower = name.toLowerCase();
       if (lower.endsWith(".mrc")) return decodeMrc(buffer);
       if (lower.endsWith(".tif") || lower.endsWith(".tiff")) return decodeTiff(buffer);
-      return decodeRasterWithBrowser(buffer, mime || "image/png");
+      return decodeRasterWithBrowser(buffer, rasterMimeForDecode(name, mime));
     }
 
     function imageUrlObject(value) {
@@ -3866,10 +3919,10 @@
 
     function setupComponentTips() {
       const tips = [
-        ["#methodUrlLabel", "URL Input", "Paste a direct image link or a local repo image path. The app loads it automatically after the URL is complete."],
+        ["#methodUrlLabel", "URL Input", "Paste a CORS-enabled direct image link or a local repo image path. The app loads it automatically after the URL is complete."],
         ["#methodUploadLabel", "Upload Input", "Use local image files when the data is already on this computer."],
-        ["#downloadUrlLabel", "Download URL", "Paste a TIFF, MRC, PNG, or JPEG URL, or a local repo path such as test_image/example.tiff. Loading and decoding happen locally in your browser."],
-        ["#downloadUrl", "Download URL", "Paste a TIFF, MRC, PNG, JPEG URL, or local repo path. The app starts loading automatically after a short pause."],
+        ["#downloadUrlLabel", "Download URL", "Paste a TIFF, MRC, PNG, or JPEG URL that allows browser fetches, or a local repo path such as test_image/example.tiff. Loading and decoding happen locally in your browser."],
+        ["#downloadUrl", "Download URL", "Paste a TIFF, MRC, PNG, JPEG URL that allows browser fetches, or a local repo path. The app starts loading automatically after a short pause."],
         ["#fileInputLabel", "Upload Images", "Browse for local image files. The table estimates nominal pixel size from filenames when possible."],
         [".browse-button", "Browse", "Choose one or more local TIFF, MRC, PNG, or JPEG files."],
         ["#autoSample", "Autosample", "When enabled, each uploaded image is split into sampled regions and automatically added to the statistics table."],
@@ -5253,7 +5306,10 @@
         const fileOpenHint = window.location.protocol === "file:"
           ? " Direct-file mode needs internet for the hosted default image; for offline use, start a local server with python -m http.server 8766 or use Upload > Browse."
           : "";
-        setStatus(`URL load failed: ${err.message}.${fileOpenHint}`);
+        const fetchHint = err instanceof TypeError
+          ? " The image host may be blocking browser fetch/CORS; try Upload, a same-origin/local-server path, or a CORS-enabled image URL."
+          : "";
+        setStatus(`URL load failed: ${err.message}.${fetchHint}${fileOpenHint}`);
       }
     }
 
